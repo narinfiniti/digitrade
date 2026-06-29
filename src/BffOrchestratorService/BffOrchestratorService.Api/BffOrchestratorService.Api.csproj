@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <ItemGroup>
+    <PackageReference Include="AutoMapper" />
+    <PackageReference Include="FluentValidation" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" PrivateAssets="all" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" />
+    <PackageReference Include="Swashbuckle.AspNetCore" />
+    <ProjectReference Include="..\..\Shared\DigiTrade.SharedKernel\DigiTrade.SharedKernel.csproj" />
+    <ProjectReference Include="..\BffOrchestratorService.Application\BffOrchestratorService.Application.csproj" />
+    <ProjectReference Include="..\BffOrchestratorService.Dependency\BffOrchestratorService.Dependency.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <NoDefaultLaunchSettingsFile>True</NoDefaultLaunchSettingsFile>
+  </PropertyGroup>
+
+</Project>

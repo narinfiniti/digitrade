@@ -1,0 +1,972 @@
+name: ${COMPOSE_PROJECT_NAME}
+
+x-api-placeholder: &api-placeholder
+  profiles:
+    - app-placeholders
+  restart: unless-stopped
+  environment:
+    ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+    DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+    ASPNETCORE_URLS: http://0.0.0.0:${API_CONTAINER_PORT}
+    OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:${OTEL_GRPC_PORT}
+    OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+    KafkaIntegrationPublisher__BootstrapServers: kafka:9092
+    SWAGGER_OAUTH_CLIENT_ID: ${SWAGGER_OAUTH_CLIENT_ID}
+    SWAGGER_OAUTH_CLIENT_SECRET: ${SWAGGER_OAUTH_CLIENT_SECRET}
+    SWAGGER_OAUTH_SCOPE: ${SWAGGER_OAUTH_SCOPE}
+    SWAGGER_OAUTH_TOKEN_URL: ${SWAGGER_OAUTH_TOKEN_URL}
+  healthcheck:
+    test:
+      - CMD-SHELL
+      - dotnet --info > /dev/null || exit 1
+    interval: 15s
+    timeout: 5s
+    retries: 10
+    start_period: 45s
+  networks:
+    - digitrade
+
+x-migration-runner: &migration-runner
+  build:
+    context: .
+    dockerfile: docker/Dockerfile.dotnet-workspace
+    args:
+      DOTNET_SDK_TAG: ${DOTNET_SDK_TAG}
+  image: ${COMPOSE_PROJECT_NAME}/dotnet-workspace:${DOTNET_SDK_TAG}
+  profiles:
+    - app-placeholders
+  working_dir: /workspace
+  restart: "no"
+  environment:
+    ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+    DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+  volumes:
+    - nuget-cache:/root/.nuget/packages
+  networks:
+    - digitrade
+
+x-observability-storage-env: &observability-storage-env
+  OBS_STORAGE_PROVIDER: ${OBS_STORAGE_PROVIDER}
+  OBS_STORAGE_S3_ENDPOINT: ${OBS_STORAGE_S3_ENDPOINT}
+  OBS_STORAGE_S3_INSECURE: ${OBS_STORAGE_S3_INSECURE}
+  OBS_STORAGE_S3_FORCE_PATH_STYLE: ${OBS_STORAGE_S3_FORCE_PATH_STYLE}
+  OBS_STORAGE_S3_BUCKET_LOOKUP_TYPE: ${OBS_STORAGE_S3_BUCKET_LOOKUP_TYPE}
+  OBS_STORAGE_ACCESS_KEY_ID: ${OBS_STORAGE_ACCESS_KEY_ID}
+  OBS_STORAGE_SECRET_ACCESS_KEY: ${OBS_STORAGE_SECRET_ACCESS_KEY}
+  MIMIR_BLOCKS_BUCKET: ${MIMIR_BLOCKS_BUCKET}
+  MIMIR_RULER_BUCKET: ${MIMIR_RULER_BUCKET}
+  MIMIR_ALERTMANAGER_BUCKET: ${MIMIR_ALERTMANAGER_BUCKET}
+  LOKI_BUCKET: ${LOKI_BUCKET}
+  TEMPO_BUCKET: ${TEMPO_BUCKET}
+
+services:
+  redis:
+    image: redis:${REDIS_TAG}
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - yes
+    ports:
+      - ${REDIS_PORT}:6379
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - ping
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - redis-data:/data
+    networks:
+      - digitrade
+
+  kafka:
+    image: bitnamilegacy/kafka:${KAFKA_TAG}
+    restart: unless-stopped
+    ports:
+      - ${KAFKA_PORT}:9092
+      - ${KAFKA_CONTROLLER_PORT}:9093
+    environment:
+      KAFKA_CFG_NODE_ID: 1
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_KRAFT_CLUSTER_ID: ${KAFKA_KRAFT_CLUSTER_ID}
+      ALLOW_PLAINTEXT_LISTENER: yes
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - /opt/bitnami/kafka/bin/kafka-topics.sh --bootstrap-server 127.0.0.1:9092 --list > /dev/null 2>&1
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    volumes:
+      - kafka-data:/bitnami/kafka
+    networks:
+      - digitrade
+
+  minio:
+    image: minio/minio:${MINIO_TAG}
+    restart: unless-stopped
+    command:
+      - server
+      - /data
+      - --console-address
+      - :9001
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - ${MINIO_API_PORT}:9000
+      - ${MINIO_CONSOLE_PORT}:9001
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - mc
+        - ready
+        - local
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - digitrade
+
+  minio-create-buckets:
+    image: minio/mc:latest
+    restart: "no"
+    entrypoint: /bin/sh -c
+    command: >-
+      'if [ "${OBS_STORAGE_PROVIDER}" != "minio" ]; then
+        echo "OBS_STORAGE_PROVIDER=${OBS_STORAGE_PROVIDER}, skipping local bucket bootstrap.";
+        exit 0;
+      fi;
+      until mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD}; do
+        echo "Waiting for MinIO alias setup...";
+        sleep 2;
+      done;
+      mc mb --ignore-existing local/${MIMIR_BLOCKS_BUCKET} &&
+      mc mb --ignore-existing local/${MIMIR_RULER_BUCKET} &&
+      mc mb --ignore-existing local/${MIMIR_ALERTMANAGER_BUCKET} &&
+      mc mb --ignore-existing local/${LOKI_BUCKET} &&
+      mc mb --ignore-existing local/${TEMPO_BUCKET}'
+    networks:
+      - digitrade
+
+  mimir:
+    image: grafana/mimir:${MIMIR_TAG}
+    restart: unless-stopped
+    environment:
+      <<: *observability-storage-env
+    command:
+      - -config.file=/etc/mimir/mimir.yml
+      - -config.expand-env=true
+    ports:
+      - ${MIMIR_PORT}:9009
+    volumes:
+      - ./mimir.yml:/etc/mimir/mimir.yml:ro
+      - mimir-data:/data
+    depends_on:
+      minio-create-buckets:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - /bin/mimir
+        - --version
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - digitrade
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:${OTEL_COLLECTOR_TAG}
+    restart: unless-stopped
+    command:
+      - --config=/etc/otelcol-contrib/config.yaml
+    ports:
+      - ${OTEL_GRPC_PORT}:4317
+      - ${OTEL_HTTP_PORT}:4318
+      - ${OTEL_HEALTH_PORT}:13133
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    healthcheck:
+      test:
+        - CMD
+        - /otelcol-contrib
+        - --version
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    depends_on:
+      minio-create-buckets:
+        condition: service_completed_successfully
+      mimir:
+        condition: service_started
+      tempo:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+    networks:
+      - digitrade
+
+  tempo:
+    image: grafana/tempo:${TEMPO_TAG}
+    restart: unless-stopped
+    user: "0:0"
+    environment:
+      <<: *observability-storage-env
+    command:
+      - -config.file=/etc/tempo/tempo.yml
+      - -config.expand-env=true
+    ports:
+      - ${TEMPO_PORT}:3200
+      - ${TEMPO_OTLP_GRPC_PORT}:4317
+      - ${TEMPO_OTLP_HTTP_PORT}:4318
+    volumes:
+      - ./tempo.yml:/etc/tempo/tempo.yml:ro
+      - tempo-data:/tmp/tempo
+    depends_on:
+      minio-create-buckets:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -qO- http://127.0.0.1:3200/ready > /dev/null || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - digitrade
+
+  loki:
+    image: grafana/loki:${LOKI_TAG}
+    restart: unless-stopped
+    environment:
+      <<: *observability-storage-env
+    command:
+      - -config.file=/etc/loki/loki-config.yml
+      - -config.expand-env=true
+    ports:
+      - ${LOKI_PORT}:3100
+    volumes:
+      - ./loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki-data:/loki
+    depends_on:
+      minio-create-buckets:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -qO- http://127.0.0.1:3100/ready > /dev/null || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - digitrade
+
+  grafana:
+    image: grafana/grafana:${GRAFANA_TAG}
+    restart: unless-stopped
+    ports:
+      - ${GRAFANA_PORT}:3000
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      mimir:
+        condition: service_started
+      tempo:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+    networks:
+      - digitrade
+
+  identity-api:
+    <<: *api-placeholder
+    build:
+      context: .
+      dockerfile: src/Identity/Identity.Api/Dockerfile
+      args:
+        DOTNET_SDK_TAG: ${DOTNET_SDK_TAG}
+        DOTNET_ASPNET_TAG: ${DOTNET_ASPNET_TAG}
+    image: identity-api:dev
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      ASPNETCORE_URLS: http://0.0.0.0:${API_CONTAINER_PORT}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:${OTEL_GRPC_PORT}
+      IDENTITY_DB_CONNECTION: ${IDENTITY_DB_CONNECTION}
+      SWAGGER_OAUTH_CLIENT_ID: ${SWAGGER_OAUTH_CLIENT_ID}
+      SWAGGER_OAUTH_CLIENT_SECRET: ${SWAGGER_OAUTH_CLIENT_SECRET}
+      SWAGGER_OAUTH_SCOPE: ${SWAGGER_OAUTH_SCOPE}
+      SWAGGER_OAUTH_TOKEN_URL: ${SWAGGER_OAUTH_TOKEN_URL}
+    ports:
+      - ${IDENTITY_API_PORT}:${API_CONTAINER_PORT}
+    depends_on:
+      identity-db-migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
+
+  account-api:
+    <<: *api-placeholder
+    build:
+      context: .
+      dockerfile: src/Account/Account.Api/Dockerfile
+      args:
+        DOTNET_SDK_TAG: ${DOTNET_SDK_TAG}
+        DOTNET_ASPNET_TAG: ${DOTNET_ASPNET_TAG}
+    image: account-api:dev
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      ASPNETCORE_URLS: http://0.0.0.0:${API_CONTAINER_PORT}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:${OTEL_GRPC_PORT}
+      ACCOUNT_DB_CONNECTION: ${ACCOUNT_DB_CONNECTION}
+    ports:
+      - ${ACCOUNT_API_PORT}:${API_CONTAINER_PORT}
+    depends_on:
+      account-db-migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
+
+  instrument-api:
+    <<: *api-placeholder
+    build:
+      context: .
+      dockerfile: src/Instrument/Instrument.Api/Dockerfile
+      args:
+        DOTNET_SDK_TAG: ${DOTNET_SDK_TAG}
+        DOTNET_ASPNET_TAG: ${DOTNET_ASPNET_TAG}
+    image: instrument-api:dev
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      ASPNETCORE_URLS: http://0.0.0.0:${API_CONTAINER_PORT}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:${OTEL_GRPC_PORT}
+      INSTRUMENT_DB_CONNECTION: ${INSTRUMENT_DB_CONNECTION}
+    ports:
+      - ${INSTRUMENT_API_PORT}:${API_CONTAINER_PORT}
+    depends_on:
+      instrument-db-migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
+
+  trade-api:
+    <<: *api-placeholder
+    build:
+      context: .
+      dockerfile: src/Trade/Trade.Api/Dockerfile
+      args:
+        DOTNET_SDK_TAG: ${DOTNET_SDK_TAG}
+        DOTNET_ASPNET_TAG: ${DOTNET_ASPNET_TAG}
+    image: trade-api:dev
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      ASPNETCORE_URLS: http://0.0.0.0:${API_CONTAINER_PORT}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:${OTEL_GRPC_PORT}
+      TRADE_DB_CONNECTION: ${TRADE_DB_CONNECTION}
+    ports:
+      - ${TRADE_API_PORT}:${API_CONTAINER_PORT}
+    depends_on:
+      trade-db-migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
+
+  order-api:
+    <<: *api-placeholder
+    build:
+      context: .
+      dockerfile: src/Order/Order.Api/Dockerfile
+      args:
+        DOTNET_SDK_TAG: ${DOTNET_SDK_TAG}
+        DOTNET_ASPNET_TAG: ${DOTNET_ASPNET_TAG}
+    image: order-api:dev
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      ASPNETCORE_URLS: http://0.0.0.0:${API_CONTAINER_PORT}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:${OTEL_GRPC_PORT}
+      ORDER_DB_CONNECTION: ${ORDER_DB_CONNECTION}
+    ports:
+      - ${ORDER_API_PORT}:${API_CONTAINER_PORT}
+    depends_on:
+      order-db-migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
+
+  risk-api:
+    <<: *api-placeholder
+    build:
+      context: .
+      dockerfile: src/Risk/Risk.Api/Dockerfile
+      args:
+        DOTNET_SDK_TAG: ${DOTNET_SDK_TAG}
+        DOTNET_ASPNET_TAG: ${DOTNET_ASPNET_TAG}
+    image: risk-api:dev
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      ASPNETCORE_URLS: http://0.0.0.0:${API_CONTAINER_PORT}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:${OTEL_GRPC_PORT}
+      RISK_DB_CONNECTION: ${RISK_DB_CONNECTION}
+    ports:
+      - ${RISK_API_PORT}:${API_CONTAINER_PORT}
+    depends_on:
+      risk-db-migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
+
+  settlement-api:
+    <<: *api-placeholder
+    build:
+      context: .
+      dockerfile: src/Settlement/Settlement.Api/Dockerfile
+      args:
+        DOTNET_SDK_TAG: ${DOTNET_SDK_TAG}
+        DOTNET_ASPNET_TAG: ${DOTNET_ASPNET_TAG}
+    image: settlement-api:dev
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      ASPNETCORE_URLS: http://0.0.0.0:${API_CONTAINER_PORT}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:${OTEL_GRPC_PORT}
+      SETTLEMENT_DB_CONNECTION: ${SETTLEMENT_DB_CONNECTION}
+    ports:
+      - ${SETTLEMENT_API_PORT}:${API_CONTAINER_PORT}
+    depends_on:
+      settlement-db-migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
+
+  ledger-api:
+    <<: *api-placeholder
+    build:
+      context: .
+      dockerfile: src/Ledger/Ledger.Api/Dockerfile
+      args:
+        DOTNET_SDK_TAG: ${DOTNET_SDK_TAG}
+        DOTNET_ASPNET_TAG: ${DOTNET_ASPNET_TAG}
+    image: ledger-api:dev
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      ASPNETCORE_URLS: http://0.0.0.0:${API_CONTAINER_PORT}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:${OTEL_GRPC_PORT}
+      LEDGER_DB_CONNECTION: ${LEDGER_DB_CONNECTION}
+    ports:
+      - ${LEDGER_API_PORT}:${API_CONTAINER_PORT}
+    depends_on:
+      ledger-db-migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
+
+  position-api:
+    <<: *api-placeholder
+    build:
+      context: .
+      dockerfile: src/Position/Position.Api/Dockerfile
+      args:
+        DOTNET_SDK_TAG: ${DOTNET_SDK_TAG}
+        DOTNET_ASPNET_TAG: ${DOTNET_ASPNET_TAG}
+    image: position-api:dev
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      ASPNETCORE_URLS: http://0.0.0.0:${API_CONTAINER_PORT}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:${OTEL_GRPC_PORT}
+      POSITION_DB_CONNECTION: ${POSITION_DB_CONNECTION}
+    ports:
+      - ${POSITION_API_PORT}:${API_CONTAINER_PORT}
+    depends_on:
+      position-db-migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
+
+  portfolio-api:
+    <<: *api-placeholder
+    build:
+      context: .
+      dockerfile: src/Portfolio/Portfolio.Api/Dockerfile
+      args:
+        DOTNET_SDK_TAG: ${DOTNET_SDK_TAG}
+        DOTNET_ASPNET_TAG: ${DOTNET_ASPNET_TAG}
+    image: portfolio-api:dev
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      ASPNETCORE_URLS: http://0.0.0.0:${API_CONTAINER_PORT}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:${OTEL_GRPC_PORT}
+      PORTFOLIO_DB_CONNECTION: ${PORTFOLIO_DB_CONNECTION}
+    ports:
+      - ${PORTFOLIO_API_PORT}:${API_CONTAINER_PORT}
+    depends_on:
+      portfolio-db-migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
+
+  pricing-api:
+    <<: *api-placeholder
+    build:
+      context: .
+      dockerfile: src/Pricing/Pricing.Api/Dockerfile
+      args:
+        DOTNET_SDK_TAG: ${DOTNET_SDK_TAG}
+        DOTNET_ASPNET_TAG: ${DOTNET_ASPNET_TAG}
+    image: pricing-api:dev
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      ASPNETCORE_URLS: http://0.0.0.0:${API_CONTAINER_PORT}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:${OTEL_GRPC_PORT}
+      PRICING_DB_CONNECTION: ${PRICING_DB_CONNECTION}
+    ports:
+      - ${PRICING_API_PORT}:${API_CONTAINER_PORT}
+    depends_on:
+      pricing-db-migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
+
+  reporting-api:
+    <<: *api-placeholder
+    build:
+      context: .
+      dockerfile: src/Reporting/Reporting.Api/Dockerfile
+      args:
+        DOTNET_SDK_TAG: ${DOTNET_SDK_TAG}
+        DOTNET_ASPNET_TAG: ${DOTNET_ASPNET_TAG}
+    image: reporting-api:dev
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      ASPNETCORE_URLS: http://0.0.0.0:${API_CONTAINER_PORT}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:${OTEL_GRPC_PORT}
+      REPORTING_DB_CONNECTION: ${REPORTING_DB_CONNECTION}
+    ports:
+      - ${REPORTING_API_PORT}:${API_CONTAINER_PORT}
+    depends_on:
+      reporting-db-migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
+
+  audit-api:
+    <<: *api-placeholder
+    build:
+      context: .
+      dockerfile: src/Audit/Audit.Api/Dockerfile
+      args:
+        DOTNET_SDK_TAG: ${DOTNET_SDK_TAG}
+        DOTNET_ASPNET_TAG: ${DOTNET_ASPNET_TAG}
+    image: audit-api:dev
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      ASPNETCORE_URLS: http://0.0.0.0:${API_CONTAINER_PORT}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:${OTEL_GRPC_PORT}
+      AUDIT_DB_CONNECTION: ${AUDIT_DB_CONNECTION}
+    ports:
+      - ${AUDIT_API_PORT}:${API_CONTAINER_PORT}
+    depends_on:
+      audit-db-migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
+
+  bff-aggregator-api:
+    <<: *api-placeholder
+    build:
+      context: .
+      dockerfile: src/BffAggregatorService/BffAggregatorService.Api/Dockerfile
+      args:
+        DOTNET_SDK_TAG: ${DOTNET_SDK_TAG}
+        DOTNET_ASPNET_TAG: ${DOTNET_ASPNET_TAG}
+    image: bff-aggregator-api:dev
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      ASPNETCORE_URLS: http://0.0.0.0:${API_CONTAINER_PORT}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:${OTEL_GRPC_PORT}
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      SWAGGER_OAUTH_CLIENT_ID: ${SWAGGER_OAUTH_CLIENT_ID}
+      SWAGGER_OAUTH_CLIENT_SECRET: ${SWAGGER_OAUTH_CLIENT_SECRET}
+      SWAGGER_OAUTH_SCOPE: ${SWAGGER_OAUTH_SCOPE}
+      SWAGGER_OAUTH_TOKEN_URL: ${SWAGGER_OAUTH_TOKEN_URL}
+      # Override downstream service URLs to use Docker Compose service names (127.0.0.1 is the container itself)
+      DownstreamServices__IdentityServiceBaseUrl: http://identity-api:${API_CONTAINER_PORT}
+      DownstreamServices__AccountServiceBaseUrl: http://account-api:${API_CONTAINER_PORT}
+      DownstreamServices__InstrumentServiceBaseUrl: http://instrument-api:${API_CONTAINER_PORT}
+      DownstreamServices__TradeServiceBaseUrl: http://trade-api:${API_CONTAINER_PORT}
+      DownstreamServices__OrderServiceBaseUrl: http://order-api:${API_CONTAINER_PORT}
+      DownstreamServices__RiskServiceBaseUrl: http://risk-api:${API_CONTAINER_PORT}
+      DownstreamServices__SettlementServiceBaseUrl: http://settlement-api:${API_CONTAINER_PORT}
+      DownstreamServices__LedgerServiceBaseUrl: http://ledger-api:${API_CONTAINER_PORT}
+      DownstreamServices__PositionServiceBaseUrl: http://position-api:${API_CONTAINER_PORT}
+      DownstreamServices__PortfolioServiceBaseUrl: http://portfolio-api:${API_CONTAINER_PORT}
+      DownstreamServices__PricingServiceBaseUrl: http://pricing-api:${API_CONTAINER_PORT}
+      DownstreamServices__ReportingServiceBaseUrl: http://reporting-api:${API_CONTAINER_PORT}
+      DownstreamServices__AuditServiceBaseUrl: http://audit-api:${API_CONTAINER_PORT}
+    ports:
+      - ${BFF_AGGREGATOR_API_PORT}:${API_CONTAINER_PORT}
+    depends_on:
+      account-api:
+        condition: service_healthy
+      instrument-api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
+
+  bff-orchestrator-api:
+    <<: *api-placeholder
+    build:
+      context: .
+      dockerfile: src/BffOrchestratorService/BffOrchestratorService.Api/Dockerfile
+      args:
+        DOTNET_SDK_TAG: ${DOTNET_SDK_TAG}
+        DOTNET_ASPNET_TAG: ${DOTNET_ASPNET_TAG}
+    image: bff-orchestrator-api:dev
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      ASPNETCORE_URLS: http://0.0.0.0:${API_CONTAINER_PORT}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:${OTEL_GRPC_PORT}
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      BFF_ORCHESTRATOR_DB_CONNECTION: ${BFF_ORCHESTRATOR_DB_CONNECTION}
+      KafkaIntegrationPublisher__BootstrapServers: kafka:9092
+      SWAGGER_OAUTH_CLIENT_ID: ${SWAGGER_OAUTH_CLIENT_ID}
+      SWAGGER_OAUTH_CLIENT_SECRET: ${SWAGGER_OAUTH_CLIENT_SECRET}
+      SWAGGER_OAUTH_SCOPE: ${SWAGGER_OAUTH_SCOPE}
+      SWAGGER_OAUTH_TOKEN_URL: ${SWAGGER_OAUTH_TOKEN_URL}
+      OrchestratorDownstreamServices__IdentityServiceBaseUrl: http://identity-api:${API_CONTAINER_PORT}
+      OrchestratorDownstreamServices__AccountServiceBaseUrl: http://account-api:${API_CONTAINER_PORT}
+      OrchestratorDownstreamServices__InstrumentServiceBaseUrl: http://instrument-api:${API_CONTAINER_PORT}
+      OrchestratorDownstreamServices__TradeServiceBaseUrl: http://trade-api:${API_CONTAINER_PORT}
+      OrchestratorDownstreamServices__OrderServiceBaseUrl: http://order-api:${API_CONTAINER_PORT}
+      OrchestratorDownstreamServices__RiskServiceBaseUrl: http://risk-api:${API_CONTAINER_PORT}
+      OrchestratorDownstreamServices__SettlementServiceBaseUrl: http://settlement-api:${API_CONTAINER_PORT}
+      OrchestratorDownstreamServices__LedgerServiceBaseUrl: http://ledger-api:${API_CONTAINER_PORT}
+      OrchestratorDownstreamServices__PositionServiceBaseUrl: http://position-api:${API_CONTAINER_PORT}
+      OrchestratorDownstreamServices__PortfolioServiceBaseUrl: http://portfolio-api:${API_CONTAINER_PORT}
+      OrchestratorDownstreamServices__PricingServiceBaseUrl: http://pricing-api:${API_CONTAINER_PORT}
+      OrchestratorDownstreamServices__ReportingServiceBaseUrl: http://reporting-api:${API_CONTAINER_PORT}
+      OrchestratorDownstreamServices__AuditServiceBaseUrl: http://audit-api:${API_CONTAINER_PORT}
+    ports:
+      - ${BFF_ORCHESTRATOR_API_PORT}:${API_CONTAINER_PORT}
+    depends_on:
+      bff-orchestrator-db-migrator:
+        condition: service_completed_successfully
+      identity-api:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
+
+  bff-notification-api:
+    <<: *api-placeholder
+    build:
+      context: .
+      dockerfile: src/BffNotificationService/BffNotificationService.Api/Dockerfile
+      args:
+        DOTNET_SDK_TAG: ${DOTNET_SDK_TAG}
+        DOTNET_ASPNET_TAG: ${DOTNET_ASPNET_TAG}
+    image: bff-notification-api:dev
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      ASPNETCORE_URLS: http://0.0.0.0:${API_CONTAINER_PORT}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:${OTEL_GRPC_PORT}
+      BFF_NOTIFICATION_DB_CONNECTION: ${BFF_NOTIFICATION_DB_CONNECTION}
+      SWAGGER_OAUTH_CLIENT_ID: ${SWAGGER_OAUTH_CLIENT_ID}
+      SWAGGER_OAUTH_CLIENT_SECRET: ${SWAGGER_OAUTH_CLIENT_SECRET}
+      SWAGGER_OAUTH_SCOPE: ${SWAGGER_OAUTH_SCOPE}
+      SWAGGER_OAUTH_TOKEN_URL: ${SWAGGER_OAUTH_TOKEN_URL}
+    ports:
+      - ${BFF_NOTIFICATION_API_PORT}:${API_CONTAINER_PORT}
+    depends_on:
+      bff-notification-db-migrator:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
+
+  api-gateway:
+    image: kong:${KONG_TAG}
+    profiles:
+      - app-placeholders
+    restart: unless-stopped
+    environment:
+      KONG_DATABASE: off
+      KONG_DECLARATIVE_CONFIG: /usr/local/kong/declarative/kong.yml
+      KONG_PROXY_LISTEN: 0.0.0.0:8000
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_ACCESS_LOG: /dev/stdout
+      KONG_ADMIN_ERROR_LOG: /dev/stderr
+      KONG_PLUGINS: bundled,identity-introspection
+    ports:
+      - ${API_GATEWAY_PORT}:8000
+    healthcheck:
+      test:
+        - CMD
+        - kong
+        - health
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    volumes:
+      - ./kong/kong.compose.yml:/usr/local/kong/declarative/kong.yml:ro
+      - ./kong/plugins/identity-introspection:/usr/local/share/lua/5.1/kong/plugins/identity-introspection:ro
+    depends_on:
+      identity-api:
+        condition: service_healthy
+      bff-aggregator-api:
+        condition: service_healthy
+      bff-orchestrator-api:
+        condition: service_healthy
+      bff-notification-api:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
+    networks:
+      - digitrade
+
+  identity-db-migrator:
+    <<: *migration-runner
+    command: >-
+      sh -lc "dotnet tool install --global dotnet-ef --version ${DOTNET_EF_TAG} && export PATH=\"/usr/share/dotnet:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.dotnet/tools\" && dotnet ef database update --project src/Identity/Identity.Persistence/Identity.Persistence.csproj --startup-project src/Identity/Identity.Persistence/Identity.Persistence.csproj --context IdentityDbContext"
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      IDENTITY_DB_CONNECTION: ${IDENTITY_DB_CONNECTION}
+
+  account-db-migrator:
+    <<: *migration-runner
+    command: >-
+      sh -lc "dotnet tool install --global dotnet-ef --version ${DOTNET_EF_TAG} && export PATH=\"/usr/share/dotnet:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.dotnet/tools\" && dotnet ef database update --project src/Account/Account.Persistence/Account.Persistence.csproj --startup-project src/Account/Account.Persistence/Account.Persistence.csproj --context AccountDbContext"
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      ACCOUNT_DB_CONNECTION: ${ACCOUNT_DB_CONNECTION}
+
+  instrument-db-migrator:
+    <<: *migration-runner
+    command: >-
+      sh -lc "dotnet tool install --global dotnet-ef --version ${DOTNET_EF_TAG} && export PATH=\"/usr/share/dotnet:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.dotnet/tools\" && dotnet ef database update --project src/Instrument/Instrument.Persistence/Instrument.Persistence.csproj --startup-project src/Instrument/Instrument.Persistence/Instrument.Persistence.csproj --context InstrumentDbContext"
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      INSTRUMENT_DB_CONNECTION: ${INSTRUMENT_DB_CONNECTION}
+
+  position-db-migrator:
+    <<: *migration-runner
+    command: >-
+      sh -lc "dotnet tool install --global dotnet-ef --version ${DOTNET_EF_TAG} && export PATH=\"/usr/share/dotnet:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.dotnet/tools\" && dotnet ef database update --project src/Position/Position.Persistence/Position.Persistence.csproj --startup-project src/Position/Position.Persistence/Position.Persistence.csproj --context PositionDbContext"
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      POSITION_DB_CONNECTION: ${POSITION_DB_CONNECTION}
+
+  portfolio-db-migrator:
+    <<: *migration-runner
+    command: >-
+      sh -lc "dotnet tool install --global dotnet-ef --version ${DOTNET_EF_TAG} && export PATH=\"/usr/share/dotnet:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.dotnet/tools\" && dotnet ef database update --project src/Portfolio/Portfolio.Persistence/Portfolio.Persistence.csproj --startup-project src/Portfolio/Portfolio.Persistence/Portfolio.Persistence.csproj --context PortfolioDbContext"
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      PORTFOLIO_DB_CONNECTION: ${PORTFOLIO_DB_CONNECTION}
+
+  pricing-db-migrator:
+    <<: *migration-runner
+    command: >-
+      sh -lc "dotnet tool install --global dotnet-ef --version ${DOTNET_EF_TAG} && export PATH=\"/usr/share/dotnet:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.dotnet/tools\" && dotnet ef database update --project src/Pricing/Pricing.Persistence/Pricing.Persistence.csproj --startup-project src/Pricing/Pricing.Persistence/Pricing.Persistence.csproj --context PricingDbContext"
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      PRICING_DB_CONNECTION: ${PRICING_DB_CONNECTION}
+
+  reporting-db-migrator:
+    <<: *migration-runner
+    command: >-
+      sh -lc "dotnet tool install --global dotnet-ef --version ${DOTNET_EF_TAG} && export PATH=\"/usr/share/dotnet:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.dotnet/tools\" && dotnet ef database update --project src/Reporting/Reporting.Persistence/Reporting.Persistence.csproj --startup-project src/Reporting/Reporting.Persistence/Reporting.Persistence.csproj --context ReportingDbContext"
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      REPORTING_DB_CONNECTION: ${REPORTING_DB_CONNECTION}
+
+  audit-db-migrator:
+    <<: *migration-runner
+    command: >-
+      sh -lc "dotnet tool install --global dotnet-ef --version ${DOTNET_EF_TAG} && export PATH=\"/usr/share/dotnet:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.dotnet/tools\" && dotnet ef database update --project src/Audit/Audit.Persistence/Audit.Persistence.csproj --startup-project src/Audit/Audit.Persistence/Audit.Persistence.csproj --context AuditDbContext"
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      AUDIT_DB_CONNECTION: ${AUDIT_DB_CONNECTION}
+
+  bff-notification-db-migrator:
+    <<: *migration-runner
+    command: >-
+      sh -lc "dotnet tool install --global dotnet-ef --version ${DOTNET_EF_TAG} && export PATH=\"/usr/share/dotnet:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.dotnet/tools\" && dotnet ef database update --project src/BffNotificationService/BffNotificationService.Persistence/BffNotificationService.Persistence.csproj --startup-project src/BffNotificationService/BffNotificationService.Persistence/BffNotificationService.Persistence.csproj --context BffNotificationDbContext"
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      BFF_NOTIFICATION_DB_CONNECTION: ${BFF_NOTIFICATION_DB_CONNECTION}
+
+  bff-orchestrator-db-migrator:
+    <<: *migration-runner
+    command: >-
+      sh -lc "dotnet tool install --global dotnet-ef --version ${DOTNET_EF_TAG} && export PATH=\"/usr/share/dotnet:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.dotnet/tools\" && dotnet ef database update --project src/BffOrchestratorService/BffOrchestratorService.Persistence/BffOrchestratorService.Persistence.csproj --startup-project src/BffOrchestratorService/BffOrchestratorService.Api/BffOrchestratorService.Api.csproj --context BffOrchestratorDbContext"
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      BFF_ORCHESTRATOR_DB_CONNECTION: ${BFF_ORCHESTRATOR_DB_CONNECTION}
+
+  trade-db-migrator:
+    <<: *migration-runner
+    command: >-
+      sh -lc "dotnet tool install --global dotnet-ef --version ${DOTNET_EF_TAG} && export PATH=\"/usr/share/dotnet:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.dotnet/tools\" && dotnet ef database update --project src/Trade/Trade.Persistence/Trade.Persistence.csproj --startup-project src/Trade/Trade.Persistence/Trade.Persistence.csproj --context TradeDbContext"
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      TRADE_DB_CONNECTION: ${TRADE_DB_CONNECTION}
+
+  order-db-migrator:
+    <<: *migration-runner
+    command: >-
+      sh -lc "dotnet tool install --global dotnet-ef --version ${DOTNET_EF_TAG} && export PATH=\"/usr/share/dotnet:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.dotnet/tools\" && dotnet ef database update --project src/Order/Order.Persistence/Order.Persistence.csproj --startup-project src/Order/Order.Persistence/Order.Persistence.csproj --context OrderDbContext"
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      ORDER_DB_CONNECTION: ${ORDER_DB_CONNECTION}
+
+  risk-db-migrator:
+    <<: *migration-runner
+    command: >-
+      sh -lc "dotnet tool install --global dotnet-ef --version ${DOTNET_EF_TAG} && export PATH=\"/usr/share/dotnet:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.dotnet/tools\" && dotnet ef database update --project src/Risk/Risk.Persistence/Risk.Persistence.csproj --startup-project src/Risk/Risk.Persistence/Risk.Persistence.csproj --context RiskDbContext"
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      RISK_DB_CONNECTION: ${RISK_DB_CONNECTION}
+
+  settlement-db-migrator:
+    <<: *migration-runner
+    command: >-
+      sh -lc "dotnet tool install --global dotnet-ef --version ${DOTNET_EF_TAG} && export PATH=\"/usr/share/dotnet:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.dotnet/tools\" && dotnet ef database update --project src/Settlement/Settlement.Persistence/Settlement.Persistence.csproj --startup-project src/Settlement/Settlement.Persistence/Settlement.Persistence.csproj --context SettlementDbContext"
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      SETTLEMENT_DB_CONNECTION: ${SETTLEMENT_DB_CONNECTION}
+
+  ledger-db-migrator:
+    <<: *migration-runner
+    command: >-
+      sh -lc "dotnet tool install --global dotnet-ef --version ${DOTNET_EF_TAG} && export PATH=\"/usr/share/dotnet:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.dotnet/tools\" && dotnet ef database update --project src/Ledger/Ledger.Persistence/Ledger.Persistence.csproj --startup-project src/Ledger/Ledger.Persistence/Ledger.Persistence.csproj --context LedgerDbContext"
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      LEDGER_DB_CONNECTION: ${LEDGER_DB_CONNECTION}
+
+networks:
+  digitrade:
+    driver: bridge
+
+volumes:
+  redis-data:
+  kafka-data:
+  nuget-cache:
+  minio-data:
+  mimir-data:
+  grafana-data:
+  tempo-data:
+  loki-data:

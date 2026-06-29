@@ -1,0 +1,20 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Trade.Application\Trade.Application.csproj" />
+    <ProjectReference Include="..\Trade.Infrastructure\Trade.Infrastructure.csproj" />
+    <ProjectReference Include="..\Trade.Persistence\Trade.Persistence.csproj" />
+    <ProjectReference Include="..\..\Shared\DigiTrade.Observability\DigiTrade.Observability.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,19 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\BffAggregatorService.Application\BffAggregatorService.Application.csproj" />
+    <ProjectReference Include="..\BffAggregatorService.Infrastructure\BffAggregatorService.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\Shared\DigiTrade.Observability\DigiTrade.Observability.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

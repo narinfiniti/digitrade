@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\BffOrchestratorService.Infrastructure\BffOrchestratorService.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\Shared\DigiTrade.Common\DigiTrade.Common.csproj" />
+    <ProjectReference Include="..\..\Shared\DigiTrade.SharedKernel\DigiTrade.SharedKernel.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

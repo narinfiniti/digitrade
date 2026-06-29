@@ -1,0 +1,428 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kong-declarative-config
+  namespace: digitrade
+data:
+  kong.yml: |
+    _format_version: "3.0"
+
+    services:
+      - name: identity-health
+        url: http://identity-api.digitrade.svc.cluster.local:8080
+        routes:
+          - name: gateway-live
+            methods: [ GET ]
+            paths: [ /health/live ]
+            protocols: [ http, https ]
+            strip_path: false
+          - name: gateway-ready
+            methods: [ GET ]
+            paths: [ /health/ready ]
+            protocols: [ http, https ]
+            strip_path: false
+
+      - name: bff-aggregator
+        url: http://bff-aggregator-api.digitrade.svc.cluster.local:8080
+        routes:
+          - name: bff-aggregator-read
+            paths: [ /api/v1/read ]
+            protocols: [ http, https ]
+            strip_path: true
+            path_handling: v0
+            plugins:
+              - name: identity-introspection
+                config:
+                  introspection_url: http://identity-api.digitrade.svc.cluster.local:8080/api/v1/identity/tokens/introspect
+                  correlation_header_name: X-Correlation-Id
+                  authenticated_subject_header_name: X-Authenticated-Subject
+                  authenticated_user_name_header_name: X-Authenticated-UserName
+                  authenticated_scopes_header_name: X-Authenticated-Scopes
+
+      - name: bff-orchestrator
+        url: http://bff-orchestrator-api.digitrade.svc.cluster.local:8080
+        routes:
+          - name: bff-orchestrator-write
+            paths: [ /api/v1/write ]
+            protocols: [ http, https ]
+            strip_path: true
+            path_handling: v0
+            plugins:
+              - name: identity-introspection
+                config:
+                  introspection_url: http://identity-api.digitrade.svc.cluster.local:8080/api/v1/identity/tokens/introspect
+                  correlation_header_name: X-Correlation-Id
+                  authenticated_subject_header_name: X-Authenticated-Subject
+                  authenticated_user_name_header_name: X-Authenticated-UserName
+                  authenticated_scopes_header_name: X-Authenticated-Scopes
+
+      - name: bff-notification
+        url: http://bff-notification-api.digitrade.svc.cluster.local:8080/notifications
+        routes:
+          - name: bff-notification-ingress
+            paths: [ /api/v1/notifications ]
+            protocols: [ http, https ]
+            strip_path: true
+            path_handling: v0
+            plugins:
+              - name: identity-introspection
+                config:
+                  introspection_url: http://identity-api.digitrade.svc.cluster.local:8080/api/v1/identity/tokens/introspect
+                  correlation_header_name: X-Correlation-Id
+                  authenticated_subject_header_name: X-Authenticated-Subject
+                  authenticated_user_name_header_name: X-Authenticated-UserName
+                  authenticated_scopes_header_name: X-Authenticated-Scopes
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kong-identity-introspection-plugin
+  namespace: digitrade
+data:
+  handler.lua: |
+    local cjson = require "cjson.safe"
+    local http = require "resty.http"
+
+    local kong = kong
+    local ngx = ngx
+
+    local IdentityIntrospectionHandler = {
+      VERSION = "1.0.0",
+      PRIORITY = 1260,
+    }
+
+    local function trim(value)
+      if value == nil then
+        return nil
+      end
+
+      local normalized = tostring(value):match("^%s*(.-)%s*$")
+      if normalized == "" then
+        return nil
+      end
+
+      return normalized
+    end
+
+    local function join_scopes(scopes)
+      if type(scopes) ~= "table" or #scopes == 0 then
+        return nil
+      end
+
+      return table.concat(scopes, " ")
+    end
+
+    local function build_problem(status, title, detail, code)
+      return {
+        status = status,
+        title = title,
+        detail = detail,
+        code = code,
+      }
+    end
+
+    local function ensure_correlation_id(conf)
+      local correlation_id = trim(kong.request.get_header(conf.correlation_header_name))
+      if correlation_id == nil then
+        correlation_id = trim(ngx.var.request_id)
+      end
+
+      kong.service.request.set_header(conf.correlation_header_name, correlation_id)
+      kong.response.set_header(conf.correlation_header_name, correlation_id)
+
+      return correlation_id
+    end
+
+    local function exit_problem(conf, correlation_id, status, title, detail, code, www_authenticate)
+      local headers = {
+        [conf.correlation_header_name] = correlation_id,
+        ["Content-Type"] = "application/problem+json",
+      }
+
+      if www_authenticate ~= nil then
+        headers["WWW-Authenticate"] = www_authenticate
+      end
+
+      return kong.response.exit(status, build_problem(status, title, detail, code), headers)
+    end
+
+    local function extract_bearer_token()
+      local authorization_header = trim(kong.request.get_header("authorization"))
+      if authorization_header == nil then
+        return nil
+      end
+
+      if string.len(authorization_header) < 8 or string.lower(string.sub(authorization_header, 1, 7)) ~= "bearer " then
+        return nil
+      end
+
+      return trim(string.sub(authorization_header, 8))
+    end
+
+    local function clear_forwarded_headers(conf)
+      kong.service.request.clear_header(conf.authenticated_subject_header_name)
+      kong.service.request.clear_header(conf.authenticated_user_name_header_name)
+      kong.service.request.clear_header(conf.authenticated_scopes_header_name)
+    end
+
+    local function introspect_token(conf, access_token)
+      local http_client = http.new()
+      http_client:set_timeout(conf.timeout_ms)
+
+      local response, request_error = http_client:request_uri(conf.introspection_url, {
+        method = "POST",
+        body = cjson.encode({ AccessToken = access_token }),
+        headers = {
+          ["Content-Type"] = "application/json",
+        },
+      })
+
+      if response == nil then
+        return nil, request_error
+      end
+
+      if response.status ~= 200 then
+        return nil, "unexpected_status"
+      end
+
+      local payload, decode_error = cjson.decode(response.body)
+      if payload == nil then
+        return nil, decode_error
+      end
+
+      return payload
+    end
+
+    local function apply_identity_context(conf, introspection_result)
+      local subject_id = trim(introspection_result.subjectId)
+      if subject_id ~= nil then
+        kong.service.request.set_header(conf.authenticated_subject_header_name, subject_id)
+      end
+
+      local claims = introspection_result.claims
+      if type(claims) == "table" then
+        local preferred_user_name = trim(claims.preferred_username)
+        if preferred_user_name ~= nil then
+          kong.service.request.set_header(conf.authenticated_user_name_header_name, preferred_user_name)
+        end
+      end
+
+      local scopes = join_scopes(introspection_result.scopes)
+      if scopes ~= nil then
+        kong.service.request.set_header(conf.authenticated_scopes_header_name, scopes)
+      end
+    end
+
+    local function authenticate_request(conf)
+      clear_forwarded_headers(conf)
+
+      local correlation_id = ensure_correlation_id(conf)
+      local access_token = extract_bearer_token()
+      if access_token == nil then
+        return exit_problem(
+          conf,
+          correlation_id,
+          401,
+          "Authentication required",
+          "A valid bearer token is required before ApiGateway can route the request.",
+          "gateway.authentication.missing_bearer_token",
+          "Bearer")
+      end
+
+      local introspection_result, introspection_error = introspect_token(conf, access_token)
+      if introspection_result == nil then
+        kong.log.err("identity introspection failed: ", introspection_error)
+
+        return exit_problem(
+          conf,
+          correlation_id,
+          503,
+          "IdentityService unavailable",
+          "ApiGateway could not reach IdentityService for token introspection.",
+          "gateway.identity.unavailable")
+      end
+
+      if introspection_result.isActive ~= true then
+        return exit_problem(
+          conf,
+          correlation_id,
+          401,
+          "Authentication failed",
+          "IdentityService reported the supplied bearer token as inactive.",
+          "gateway.authentication.invalid_token",
+          "Bearer error=\"invalid_token\"")
+      end
+
+      apply_identity_context(conf, introspection_result)
+    end
+
+    function IdentityIntrospectionHandler:access(conf)
+      return authenticate_request(conf)
+    end
+
+    function IdentityIntrospectionHandler:ws_handshake(conf)
+      return authenticate_request(conf)
+    end
+
+    return IdentityIntrospectionHandler
+  schema.lua: |
+    local typedefs = require "kong.db.schema.typedefs"
+
+    return {
+      name = "identity-introspection",
+      fields = {
+        {
+          consumer = typedefs.no_consumer,
+        },
+        {
+          protocols = {
+            type = "set",
+            required = true,
+            default = { "http", "https", "ws", "wss" },
+            elements = {
+              type = "string",
+              one_of = { "http", "https", "ws", "wss" },
+            },
+          },
+        },
+        {
+          config = {
+            type = "record",
+            fields = {
+              {
+                introspection_url = {
+                  type = "string",
+                  required = true,
+                  match = "^https?://",
+                },
+              },
+              {
+                correlation_header_name = {
+                  type = "string",
+                  default = "X-Correlation-Id",
+                  len_min = 1,
+                },
+              },
+              {
+                authenticated_subject_header_name = {
+                  type = "string",
+                  default = "X-Authenticated-Subject",
+                  len_min = 1,
+                },
+              },
+              {
+                authenticated_user_name_header_name = {
+                  type = "string",
+                  default = "X-Authenticated-UserName",
+                  len_min = 1,
+                },
+              },
+              {
+                authenticated_scopes_header_name = {
+                  type = "string",
+                  default = "X-Authenticated-Scopes",
+                  len_min = 1,
+                },
+              },
+              {
+                timeout_ms = {
+                  type = "integer",
+                  default = 3000,
+                  between = { 100, 60000 },
+                },
+              },
+            },
+          },
+        },
+      },
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: digitrade
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api-gateway
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+    spec:
+      containers:
+        - name: kong
+          image: kong:3.7
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: KONG_DATABASE
+              value: "off"
+            - name: KONG_DECLARATIVE_CONFIG
+              value: /usr/local/kong/declarative/kong.yml
+            - name: KONG_PROXY_LISTEN
+              value: 0.0.0.0:8000
+            - name: KONG_PROXY_ACCESS_LOG
+              value: /dev/stdout
+            - name: KONG_PROXY_ERROR_LOG
+              value: /dev/stderr
+            - name: KONG_ADMIN_ACCESS_LOG
+              value: /dev/stdout
+            - name: KONG_ADMIN_ERROR_LOG
+              value: /dev/stderr
+            - name: KONG_PLUGINS
+              value: bundled,identity-introspection
+          ports:
+            - containerPort: 8000
+          volumeMounts:
+            - name: kong-declarative-config
+              mountPath: /usr/local/kong/declarative/kong.yml
+              subPath: kong.yml
+              readOnly: true
+            - name: kong-custom-plugin
+              mountPath: /usr/local/share/lua/5.1/kong/plugins/identity-introspection
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8000
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 6
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -lc
+                - wget -qS --spider --header='Authorization: Bearer readiness-probe' http://127.0.0.1:8000/api/v1/read 2>&1 | grep -q 'HTTP/1.1 401'
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+      volumes:
+        - name: kong-declarative-config
+          configMap:
+            name: kong-declarative-config
+        - name: kong-custom-plugin
+          configMap:
+            name: kong-identity-introspection-plugin
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+  namespace: digitrade
+spec:
+  selector:
+    app: api-gateway
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000

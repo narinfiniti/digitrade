@@ -1,0 +1,19 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\BffNotificationService.Infrastructure\BffNotificationService.Infrastructure.csproj" />
+    <ProjectReference Include="..\BffNotificationService.Persistence\BffNotificationService.Persistence.csproj" />
+    <ProjectReference Include="..\..\Shared\DigiTrade.Observability\DigiTrade.Observability.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: DigiTrade Dashboards
+    orgId: 1
+    folder: DigiTrade
+    type: file
+    disableDeletion: false
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/provisioning/dashboards/json

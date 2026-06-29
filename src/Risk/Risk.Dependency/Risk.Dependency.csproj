@@ -1,0 +1,20 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Risk.Application\Risk.Application.csproj" />
+    <ProjectReference Include="..\Risk.Infrastructure\Risk.Infrastructure.csproj" />
+    <ProjectReference Include="..\Risk.Persistence\Risk.Persistence.csproj" />
+    <ProjectReference Include="..\..\Shared\DigiTrade.Observability\DigiTrade.Observability.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

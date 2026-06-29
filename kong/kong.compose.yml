@@ -1,0 +1,214 @@
+_format_version: "3.0"
+
+services:
+  - name: identity-health
+    url: http://identity-api:8080
+    routes:
+      - name: identity-api
+        paths:
+          - /api/v1/identity
+        protocols:
+          - http
+          - https
+        strip_path: false
+      - name: gateway-live
+        methods:
+          - GET
+        paths:
+          - /health/live
+        protocols:
+          - http
+          - https
+        strip_path: false
+      - name: identity-swagger
+        paths:
+          - /swagger/identity
+        protocols:
+          - http
+          - https
+        strip_path: true
+      - name: gateway-ready
+        methods:
+          - GET
+        paths:
+          - /health/ready
+        protocols:
+          - http
+          - https
+        strip_path: false
+
+  - name: bff-aggregator
+    url: http://bff-aggregator-api:8080
+    routes:
+      - name: bff-aggregator-read
+        paths:
+          - /api/v1/read
+        protocols:
+          - http
+          - https
+        strip_path: true
+        path_handling: v0
+        plugins:
+          - name: identity-introspection
+            config:
+              introspection_url: http://identity-api:8080/api/v1/identity/tokens/introspect
+              correlation_header_name: X-Correlation-Id
+              authenticated_subject_header_name: X-Authenticated-Subject
+              authenticated_user_name_header_name: X-Authenticated-UserName
+              authenticated_scopes_header_name: X-Authenticated-Scopes
+          - name: rate-limiting
+            config:
+              policy: local
+              limit_by: ip
+              minute: 60
+              fault_tolerant: false
+      - name: bff-aggregator-swagger
+        paths:
+          - /swagger/aggregator
+        protocols:
+          - http
+          - https
+        strip_path: true
+
+  - name: bff-orchestrator
+    url: http://bff-orchestrator-api:8080
+    routes:
+      - name: bff-orchestrator-write
+        paths:
+          - /api/v1/write
+        protocols:
+          - http
+          - https
+        strip_path: true
+        path_handling: v0
+        plugins:
+          - name: identity-introspection
+            config:
+              introspection_url: http://identity-api:8080/api/v1/identity/tokens/introspect
+              correlation_header_name: X-Correlation-Id
+              authenticated_subject_header_name: X-Authenticated-Subject
+              authenticated_user_name_header_name: X-Authenticated-UserName
+              authenticated_scopes_header_name: X-Authenticated-Scopes
+          - name: rate-limiting
+            config:
+              policy: local
+              limit_by: ip
+              minute: 60
+              fault_tolerant: false
+      - name: bff-orchestrator-swagger
+        paths:
+          - /swagger/orchestrator
+        protocols:
+          - http
+          - https
+        strip_path: true
+
+  - name: bff-notification
+    url: http://bff-notification-api:8080
+    routes:
+      - name: bff-notification-contract-notifications
+        paths:
+          - /api/v1/notifications
+        protocols:
+          - http
+          - https
+        strip_path: false
+        plugins:
+          - name: identity-introspection
+            config:
+              introspection_url: http://identity-api:8080/api/v1/identity/tokens/introspect
+              correlation_header_name: X-Correlation-Id
+              authenticated_subject_header_name: X-Authenticated-Subject
+              authenticated_user_name_header_name: X-Authenticated-UserName
+              authenticated_scopes_header_name: X-Authenticated-Scopes
+          - name: rate-limiting
+            config:
+              policy: local
+              limit_by: ip
+              minute: 60
+              fault_tolerant: false
+      - name: bff-notification-contract-preferences
+        paths:
+          - /api/v1/notification-preferences
+        protocols:
+          - http
+          - https
+        strip_path: false
+        plugins:
+          - name: identity-introspection
+            config:
+              introspection_url: http://identity-api:8080/api/v1/identity/tokens/introspect
+              correlation_header_name: X-Correlation-Id
+              authenticated_subject_header_name: X-Authenticated-Subject
+              authenticated_user_name_header_name: X-Authenticated-UserName
+              authenticated_scopes_header_name: X-Authenticated-Scopes
+          - name: rate-limiting
+            config:
+              policy: local
+              limit_by: ip
+              minute: 60
+              fault_tolerant: false
+      - name: bff-notification-contract-push
+        paths:
+          - /api/v1/push
+        protocols:
+          - http
+          - https
+        strip_path: false
+        plugins:
+          - name: identity-introspection
+            config:
+              introspection_url: http://identity-api:8080/api/v1/identity/tokens/introspect
+              correlation_header_name: X-Correlation-Id
+              authenticated_subject_header_name: X-Authenticated-Subject
+              authenticated_user_name_header_name: X-Authenticated-UserName
+              authenticated_scopes_header_name: X-Authenticated-Scopes
+          - name: rate-limiting
+            config:
+              policy: local
+              limit_by: ip
+              minute: 60
+              fault_tolerant: false
+      - name: bff-notification-terminal
+        paths:
+          - /notifications
+        protocols:
+          - http
+          - https
+        strip_path: false
+        plugins:
+          - name: identity-introspection
+            config:
+              introspection_url: http://identity-api:8080/api/v1/identity/tokens/introspect
+              correlation_header_name: X-Correlation-Id
+              authenticated_subject_header_name: X-Authenticated-Subject
+              authenticated_user_name_header_name: X-Authenticated-UserName
+              authenticated_scopes_header_name: X-Authenticated-Scopes
+          - name: rate-limiting
+            config:
+              policy: local
+              limit_by: ip
+              minute: 60
+              fault_tolerant: false
+      - name: bff-notification-ws
+        paths:
+          - /ws
+        protocols:
+          - http
+          - https
+        strip_path: false
+        plugins:
+          - name: identity-introspection
+            config:
+              introspection_url: http://identity-api:8080/api/v1/identity/tokens/introspect
+              correlation_header_name: X-Correlation-Id
+              authenticated_subject_header_name: X-Authenticated-Subject
+              authenticated_user_name_header_name: X-Authenticated-UserName
+              authenticated_scopes_header_name: X-Authenticated-Scopes
+      - name: bff-notification-swagger
+        paths:
+          - /swagger/notification
+        protocols:
+          - http
+          - https
+        strip_path: true

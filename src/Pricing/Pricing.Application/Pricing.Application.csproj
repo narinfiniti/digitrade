@@ -1,0 +1,15 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\Shared\DigiTrade.Common\DigiTrade.Common.csproj" />
+    <ProjectReference Include="..\..\Shared\DigiTrade.SharedKernel\DigiTrade.SharedKernel.csproj" />
+    <ProjectReference Include="..\Pricing.Domain\Pricing.Domain.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

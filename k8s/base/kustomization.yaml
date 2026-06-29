@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: digitrade
+
+resources:
+  - namespace.yaml
+  - identity-api.yaml
+  - account-api.yaml
+  - instrument-api.yaml
+  - trade-api.yaml
+  - order-api.yaml
+  - risk-api.yaml
+  - settlement-api.yaml
+  - ledger-api.yaml
+  - position-api.yaml
+  - portfolio-api.yaml
+  - pricing-api.yaml
+  - reporting-api.yaml
+  - audit-api.yaml
+  - bff-aggregator-api.yaml
+  - bff-orchestrator-api.yaml
+  - bff-notification-api.yaml
+  - api-gateway.yaml

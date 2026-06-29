@@ -1,0 +1,22 @@
+ARG DOTNET_SDK_TAG=9.0
+ARG DOTNET_ASPNET_TAG=9.0
+
+FROM mcr.microsoft.com/dotnet/sdk:${DOTNET_SDK_TAG} AS build
+ARG PROJECT_PATH
+
+WORKDIR /src
+COPY . .
+
+RUN test -n "$PROJECT_PATH"
+RUN dotnet restore "$PROJECT_PATH"
+RUN dotnet publish "$PROJECT_PATH" -c Release -o /app/publish /p:UseAppHost=false
+
+FROM mcr.microsoft.com/dotnet/aspnet:${DOTNET_ASPNET_TAG}
+WORKDIR /app
+
+COPY --from=build /app/publish .
+
+ENV ASPNETCORE_URLS=http://0.0.0.0:8080
+ENV APP_DLL=app.dll
+
+ENTRYPOINT ["sh", "-lc", "dotnet \"$APP_DLL\""]

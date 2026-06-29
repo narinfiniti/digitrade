@@ -1,0 +1,20 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <PackageReference Include="AutoMapper" />
+    <PackageReference Include="FluentValidation" />
+    <PackageReference Include="MediatR" />
+    <ProjectReference Include="..\..\Shared\DigiTrade.Common\DigiTrade.Common.csproj" />
+    <ProjectReference Include="..\..\Shared\DigiTrade.Messaging\DigiTrade.Messaging.csproj" />
+    <ProjectReference Include="..\..\Shared\DigiTrade.Persistence\DigiTrade.Persistence.csproj" />
+    <ProjectReference Include="..\..\Shared\DigiTrade.SharedKernel\DigiTrade.SharedKernel.csproj" />
+    <ProjectReference Include="..\Risk.Domain\Risk.Domain.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

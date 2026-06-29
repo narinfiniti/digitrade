@@ -1,0 +1,65 @@
+multitenancy_enabled: false
+
+usage_stats:
+  enabled: false
+
+server:
+  http_listen_port: 9009
+  log_level: info
+
+blocks_storage:
+  backend: s3
+  s3:
+    endpoint: ${OBS_STORAGE_S3_ENDPOINT}
+    bucket_name: ${MIMIR_BLOCKS_BUCKET}
+    access_key_id: ${OBS_STORAGE_ACCESS_KEY_ID}
+    secret_access_key: ${OBS_STORAGE_SECRET_ACCESS_KEY}
+    insecure: ${OBS_STORAGE_S3_INSECURE}
+    bucket_lookup_type: ${OBS_STORAGE_S3_BUCKET_LOOKUP_TYPE}
+  bucket_store:
+    sync_dir: /data/tsdb-sync
+  tsdb:
+    dir: /data/tsdb
+
+compactor:
+  data_dir: /data/compactor
+  sharding_ring:
+    kvstore:
+      store: memberlist
+
+distributor:
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: memberlist
+
+ingester:
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: memberlist
+    replication_factor: 1
+
+ruler_storage:
+  backend: s3
+  s3:
+    endpoint: ${OBS_STORAGE_S3_ENDPOINT}
+    bucket_name: ${MIMIR_RULER_BUCKET}
+    access_key_id: ${OBS_STORAGE_ACCESS_KEY_ID}
+    secret_access_key: ${OBS_STORAGE_SECRET_ACCESS_KEY}
+    insecure: ${OBS_STORAGE_S3_INSECURE}
+    bucket_lookup_type: ${OBS_STORAGE_S3_BUCKET_LOOKUP_TYPE}
+
+alertmanager_storage:
+  backend: s3
+  s3:
+    endpoint: ${OBS_STORAGE_S3_ENDPOINT}
+    bucket_name: ${MIMIR_ALERTMANAGER_BUCKET}
+    access_key_id: ${OBS_STORAGE_ACCESS_KEY_ID}
+    secret_access_key: ${OBS_STORAGE_SECRET_ACCESS_KEY}
+    insecure: ${OBS_STORAGE_S3_INSECURE}
+    bucket_lookup_type: ${OBS_STORAGE_S3_BUCKET_LOOKUP_TYPE}
+
+store_gateway:
+  sharding_ring:
+    replication_factor: 1

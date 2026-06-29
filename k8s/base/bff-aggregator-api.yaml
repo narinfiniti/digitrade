@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bff-aggregator-api
+  namespace: digitrade
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bff-aggregator-api
+  template:
+    metadata:
+      labels:
+        app: bff-aggregator-api
+    spec:
+      containers:
+        - name: bff-aggregator-api
+          image: bff-aggregator-api:dev
+          imagePullPolicy: Never
+          env:
+            - name: ASPNETCORE_ENVIRONMENT
+              value: Development
+            - name: DOTNET_ENVIRONMENT
+              value: Development
+            - name: ASPNETCORE_URLS
+              value: http://0.0.0.0:8080
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.digitrade.svc.cluster.local:4317
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: grpc
+          ports:
+            - containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bff-aggregator-api
+  namespace: digitrade
+spec:
+  selector:
+    app: bff-aggregator-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

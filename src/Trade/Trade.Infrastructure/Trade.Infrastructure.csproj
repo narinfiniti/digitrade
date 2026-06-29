@@ -1,0 +1,16 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Trade.Application\Trade.Application.csproj" />
+    <ProjectReference Include="..\..\Shared\DigiTrade.Messaging\DigiTrade.Messaging.csproj" />
+    <ProjectReference Include="..\..\Shared\DigiTrade.Messaging.Persistence\DigiTrade.Messaging.Persistence.csproj" />
+    <ProjectReference Include="..\..\Shared\DigiTrade.Observability\DigiTrade.Observability.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

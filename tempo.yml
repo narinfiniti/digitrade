@@ -1,0 +1,29 @@
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+        http:
+
+ingester:
+  max_block_duration: 5m
+
+compactor:
+  compaction:
+    block_retention: 24h
+
+storage:
+  trace:
+    backend: s3
+    wal:
+      path: /tmp/tempo/wal
+    s3:
+      bucket: ${TEMPO_BUCKET}
+      endpoint: ${OBS_STORAGE_S3_ENDPOINT}
+      access_key: ${OBS_STORAGE_ACCESS_KEY_ID}
+      secret_key: ${OBS_STORAGE_SECRET_ACCESS_KEY}
+      insecure: ${OBS_STORAGE_S3_INSECURE}
+      forcepathstyle: ${OBS_STORAGE_S3_FORCE_PATH_STYLE}
